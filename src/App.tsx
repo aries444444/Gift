@@ -25,7 +25,7 @@ const bodyPhotoPaths = [
 ];
 
 // --- 视觉配置 ---
-const CONFIG = {
+let CONFIG = {
   colors: {
     emerald: '#004225', // 纯正祖母绿
     gold: '#FFD700',
@@ -53,6 +53,21 @@ const CONFIG = {
     body: bodyPhotoPaths
   }
 };
+
+// --- 移动端适配 ---
+const isMobile = typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad|iPod|Phone/i.test(navigator.userAgent);
+if (isMobile) {
+  // 大幅降低粒子与饰品数量以适配移动设备性能
+  CONFIG.counts = {
+    ...CONFIG.counts,
+    foliage: 2500,
+    ornaments: 80,
+    elements: 50,
+    lights: 100
+  };
+}
+
+const SPARKLES_COUNT = isMobile ? 150 : 600;
 
 // --- Shader Material (Foliage) ---
 const FoliageMaterial = shaderMaterial(
@@ -392,11 +407,15 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
   return (
     <>
       <PerspectiveCamera makeDefault position={[0, 8, 60]} fov={45} />
-      <OrbitControls ref={controlsRef} enablePan={false} enableZoom={true} minDistance={30} maxDistance={120} autoRotate={rotationSpeed === 0 && sceneState === 'FORMED'} autoRotateSpeed={0.3} maxPolarAngle={Math.PI / 1.7} />
+      <OrbitControls ref={controlsRef} enablePan={false} enableZoom={true} rotateSpeed={isMobile ? 0.3 : 0.5} minDistance={30} maxDistance={120} autoRotate={rotationSpeed === 0 && sceneState === 'FORMED'} autoRotateSpeed={0.3} maxPolarAngle={Math.PI / 1.7} />
 
       <color attach="background" args={['#000300']} />
-      <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
-      <Environment preset="night" background={false} />
+        <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
+        {/* 环境光贴图（HDR）可能需要从外部 CDN 加载，会在网络不佳时失败。
+           我们已将 HDR 下载到 `public/hdri/dikhololo_night_1k.hdr`，仅在非移动端从本地加载以恢复真实感光照。 */}
+        {!isMobile && (
+          <Environment files="/hdri/dikhololo_night_1k.hdr" background={false} />
+        )}
 
       <ambientLight intensity={0.4} color="#003311" />
       <pointLight position={[30, 30, 30]} intensity={100} color={CONFIG.colors.warmLight} />
@@ -411,13 +430,16 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
            <FairyLights state={sceneState} />
            <TopStar state={sceneState} />
         </Suspense>
-        <Sparkles count={600} scale={50} size={8} speed={0.4} opacity={0.4} color={CONFIG.colors.silver} />
+        <Sparkles count={SPARKLES_COUNT} scale={50} size={8} speed={0.4} opacity={0.4} color={CONFIG.colors.silver} />
       </group>
 
-      <EffectComposer>
-        <Bloom luminanceThreshold={0.8} luminanceSmoothing={0.1} intensity={1.5} radius={0.5} mipmapBlur />
-        <Vignette eskil={false} offset={0.1} darkness={1.2} />
-      </EffectComposer>
+        {/* 在移动端禁用开销较大的后期处理，改善性能 */}
+        {!isMobile && (
+          <EffectComposer>
+            <Bloom luminanceThreshold={0.8} luminanceSmoothing={0.1} intensity={1.5} radius={0.5} mipmapBlur />
+            <Vignette eskil={false} offset={0.1} darkness={1.2} />
+          </EffectComposer>
+        )}
     </>
   );
 };
@@ -513,7 +535,7 @@ export default function GrandTreeApp() {
   return (
     <div style={{ width: '100vw', height: '100vh', backgroundColor: '#000', position: 'relative', overflow: 'hidden' }}>
       <div style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 1 }}>
-        <Canvas dpr={[1, 2]} gl={{ toneMapping: THREE.ReinhardToneMapping }} shadows>
+        <Canvas dpr={isMobile ? 1 : [1, 2]} gl={{ toneMapping: THREE.ReinhardToneMapping }} shadows={!isMobile}>
             <Experience sceneState={sceneState} rotationSpeed={rotationSpeed} />
         </Canvas>
       </div>
