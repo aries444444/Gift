@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect, Suspense } from 'react';
+import React, { useState, useMemo, useRef, useEffect, Suspense } from 'react';
 import { Canvas, useFrame, extend } from '@react-three/fiber';
 import {
   OrbitControls,
@@ -7,14 +7,68 @@ import {
   shaderMaterial,
   Float,
   Stars,
-  Sparkles,
-  useTexture
+  Sparkles
 } from '@react-three/drei';
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing';
 import * as THREE from 'three';
 import { MathUtils } from 'three';
 import * as random from 'maath/random';
 import { GestureRecognizer, FilesetResolver, DrawingUtils } from "@mediapipe/tasks-vision";
+
+// --- Safe texture loader: loads textures and substitutes a generated fallback on error ---
+function useSafeTextures(urls: string[]) {
+  const [textures, setTextures] = useState<THREE.Texture[]>([]);
+  useEffect(() => {
+    let mounted = true;
+    const loader = new THREE.TextureLoader();
+    const promises = urls.map(url => new Promise<THREE.Texture>(resolve => {
+      loader.load(url,
+        (tex) => resolve(tex),
+        undefined,
+        () => {
+          // on error -> create a small canvas fallback texture
+          const size = 128;
+          const canvas = document.createElement('canvas');
+          canvas.width = canvas.height = size;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#222'; ctx.fillRect(0,0,size,size);
+            ctx.fillStyle = '#FFD700'; ctx.fillRect(4,4,size-8,size-8);
+            ctx.fillStyle = '#000'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText('?', size/2, size/2);
+          }
+          const fallback = new THREE.CanvasTexture(canvas as HTMLCanvasElement);
+          resolve(fallback);
+        }
+      );
+    }));
+    Promise.all(promises).then(res => {
+      if (!mounted) return;
+      // keep only successfully loaded textures
+      const available = res.filter(t => t !== null) as THREE.Texture[];
+      // if none available, create a few generated fallbacks to avoid empty state
+      if (available.length === 0) {
+        const generate = (color: string) => {
+          const size = 128;
+          const canvas = document.createElement('canvas');
+          canvas.width = canvas.height = size;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = color; ctx.fillRect(0,0,size,size);
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText('IMG', size/2, size/2);
+          }
+          return new THREE.CanvasTexture(canvas as HTMLCanvasElement);
+        };
+        setTextures([generate('#444'), generate('#666'), generate('#888')]);
+      } else {
+        setTextures(available);
+      }
+    });
+    return () => { mounted = false; };
+  }, [urls.join('|')]);
+  return textures;
+}
 
 // --- 动态生成照片列表 (top.jpg + 1.jpg 到 31.jpg) ---
 const TOTAL_NUMBERED_PHOTOS = 31;
@@ -140,7 +194,8 @@ const Foliage = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
 
 // --- Component: Photo Ornaments (Double-Sided Polaroid) ---
 const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
-  const textures = useTexture(CONFIG.photos.body);
+  // const textures = useTexture(CONFIG.photos.body);
+  const textures = useSafeTextures(CONFIG.photos.body);
   const count = CONFIG.counts.ornaments;
   const groupRef = useRef<THREE.Group>(null);
 
@@ -148,6 +203,10 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
   const photoGeometry = useMemo(() => new THREE.PlaneGeometry(1, 1), []);
 
   const data = useMemo(() => {
+    // build a texture pool where each available texture appears at most twice
+    const pool: THREE.Texture[] = [];
+    for (const t of textures) { pool.push(t); pool.push(t); }
+    const poolLen = pool.length || 1;
     return new Array(count).fill(0).map((_, i) => {
       const chaosPos = new THREE.Vector3((Math.random()-0.5)*70, (Math.random()-0.5)*70, (Math.random()-0.5)*70);
       const h = CONFIG.tree.height; const y = (Math.random() * h) - (h / 2);
@@ -170,7 +229,8 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
 
       return {
         chaosPos, targetPos, scale: baseScale, weight,
-        textureIndex: i % textures.length,
+        // pick texture from pool (textures duplicated twice). If pool empty, texture will be undefined and handled later.
+        texture: poolLen ? pool[i % poolLen] : undefined,
         borderColor,
         currentPos: chaosPos.clone(),
         chaosRotation,
@@ -180,6 +240,9 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
       };
     });
   }, [textures, count]);
+  // Note: do NOT early-return here. Hooks (like useFrame) must be called
+  // in the same order on every render. Instead, guard inside useFrame or
+  // rendering logic when textures are not yet available.
 
   useFrame((stateObj, delta) => {
     if (!groupRef.current) return;
@@ -210,6 +273,11 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
     });
   });
 
+  if (!textures || textures.length === 0) {
+    // still return an empty group to preserve hooks order; textures will be populated soon
+    return <group ref={groupRef} />;
+  }
+
   return (
     <group ref={groupRef}>
       {data.map((obj, i) => (
@@ -218,9 +286,9 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
           <group position={[0, 0, 0.015]}>
             <mesh geometry={photoGeometry}>
               <meshStandardMaterial
-                map={textures[obj.textureIndex]}
+                map={obj.texture}
                 roughness={0.5} metalness={0}
-                emissive={CONFIG.colors.white} emissiveMap={textures[obj.textureIndex]} emissiveIntensity={1.0}
+                emissive={CONFIG.colors.white} emissiveMap={obj.texture} emissiveIntensity={1.0}
                 side={THREE.FrontSide}
               />
             </mesh>
@@ -232,9 +300,9 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
           <group position={[0, 0, -0.015]} rotation={[0, Math.PI, 0]}>
             <mesh geometry={photoGeometry}>
               <meshStandardMaterial
-                map={textures[obj.textureIndex]}
+                map={obj.texture}
                 roughness={0.5} metalness={0}
-                emissive={CONFIG.colors.white} emissiveMap={textures[obj.textureIndex]} emissiveIntensity={1.0}
+                emissive={CONFIG.colors.white} emissiveMap={obj.texture} emissiveIntensity={1.0}
                 side={THREE.FrontSide}
               />
             </mesh>
@@ -433,8 +501,8 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
         <Sparkles count={SPARKLES_COUNT} scale={50} size={8} speed={0.4} opacity={0.4} color={CONFIG.colors.silver} />
       </group>
 
-        {/* 在移动端禁用开销较大的后期处理，改善性能 */}
-        {!isMobile && (
+        {/* 在移动端禁用开销较大的后期处理，改善性能。并且仅在 WebGL 可用时启用，避免内部 composer 抛错 */}
+        {!isMobile && detectWebGL() && (
           <EffectComposer>
             <Bloom luminanceThreshold={0.8} luminanceSmoothing={0.1} intensity={1.5} radius={0.5} mipmapBlur />
             <Vignette eskil={false} offset={0.1} darkness={1.2} />
@@ -442,6 +510,41 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
         )}
     </>
   );
+};
+
+// --- Error Boundary for runtime errors ---
+class ErrorBoundary extends React.Component<any, { error: Error | null }> {
+  constructor(props: any) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error, info: any) { console.error('ErrorBoundary caught', error, info); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', color: '#f88', zIndex: 9999 }}>
+          <div style={{ maxWidth: 900, padding: 20 }}>
+            <h2 style={{ margin: 0 }}>Runtime error</h2>
+            <pre style={{ whiteSpace: 'pre-wrap', color: '#fff', background: 'rgba(0,0,0,0.6)', padding: 12, borderRadius: 6 }}>{String(this.state.error && this.state.error.stack ? this.state.error.stack : this.state.error)}</pre>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// --- WebGL support check component ---
+const WebGLCheck = ({ onResult }: { onResult: (ok: boolean, info?: string) => void }) => {
+  useEffect(() => {
+    try {
+      const canvas = document.createElement('canvas');
+      const gl2 = canvas.getContext('webgl2');
+      if (gl2) { onResult(true, 'webgl2'); return; }
+      const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+      if (gl) { onResult(true, 'webgl'); return; }
+      onResult(false, 'no-webgl');
+    } catch (e: any) { onResult(false, e && e.message ? e.message : 'webgl-check-error'); }
+  }, [onResult]);
+  return null;
 };
 
 // --- Gesture Controller ---
@@ -531,14 +634,34 @@ export default function GrandTreeApp() {
   const [rotationSpeed, setRotationSpeed] = useState(0);
   const [aiStatus, setAiStatus] = useState("INITIALIZING...");
   const [debugMode, setDebugMode] = useState(false);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
+  const [webglInfo, setWebglInfo] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handler = (ev: ErrorEvent) => {
+      setRuntimeError(ev.message + (ev.error && ev.error.stack ? '\n' + ev.error.stack : ''));
+    };
+    const rej = (ev: PromiseRejectionEvent) => {
+      setRuntimeError('UnhandledRejection: ' + (ev.reason && ev.reason.stack ? ev.reason.stack : String(ev.reason)));
+    };
+    window.addEventListener('error', handler);
+    window.addEventListener('unhandledrejection', rej as any);
+    return () => { window.removeEventListener('error', handler); window.removeEventListener('unhandledrejection', rej as any); };
+  }, []);
 
   return (
     <div style={{ width: '100vw', height: '100vh', backgroundColor: '#000', position: 'relative', overflow: 'hidden' }}>
       <div style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 1 }}>
-        <Canvas dpr={isMobile ? 1 : [1, 2]} gl={{ toneMapping: THREE.ReinhardToneMapping }} shadows={!isMobile}>
-            <Experience sceneState={sceneState} rotationSpeed={rotationSpeed} />
-        </Canvas>
+        <ErrorBoundary>
+          <Canvas dpr={isMobile ? 1 : [1, 2]} gl={{ toneMapping: THREE.ReinhardToneMapping }} shadows={!isMobile}>
+              <Experience sceneState={sceneState} rotationSpeed={rotationSpeed} />
+          </Canvas>
+        </ErrorBoundary>
       </div>
+      {/* Runtime checks - WebGL support and global errors */}
+      <WebGLCheck onResult={(ok, info) => setWebglInfo(`${ok ? 'OK' : 'NO'}:${info}`)} />
+      {/* capture global errors to show overlay */}
+      <script dangerouslySetInnerHTML={{ __html: `window.addEventListener('error', function(e){ fetch('/__error_log', {method:'POST', body: e.message}).catch(()=>{}); });` }} />
       <GestureController onGesture={setSceneState} onMove={setRotationSpeed} onStatus={setAiStatus} debugMode={debugMode} />
 
       {/* UI - Stats */}
@@ -571,6 +694,25 @@ export default function GrandTreeApp() {
       <div style={{ position: 'absolute', top: '20px', left: '50%', transform: 'translateX(-50%)', color: aiStatus.includes('ERROR') ? '#FF0000' : 'rgba(255, 215, 0, 0.4)', fontSize: '10px', letterSpacing: '2px', zIndex: 10, background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: '4px' }}>
         {aiStatus}
       </div>
+
+      {/* Debug Overlay: WebGL / runtime errors */}
+      <div style={{ position: 'absolute', top: 10, right: 10, zIndex: 9999, color: '#fff', fontSize: 12, background: 'rgba(0,0,0,0.6)', padding: '6px 10px', borderRadius: 6 }}>
+        <div><strong>WebGL:</strong> {webglInfo || 'checking...'}</div>
+        {runtimeError && (<div style={{ marginTop: 6, color: '#f88' }}><strong>Runtime:</strong><pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{runtimeError}</pre></div>)}
+      </div>
     </div>
   );
+}
+
+// --- Sync WebGL availability check (used to guard postprocessing) ---
+function detectWebGL() {
+  try {
+    const canvas = document.createElement('canvas');
+    if (!!(canvas.getContext && (canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl')))) {
+      return true;
+    }
+  } catch (e) {
+    // ignore
+  }
+  return false;
 }
